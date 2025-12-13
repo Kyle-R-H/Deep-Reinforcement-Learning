@@ -9,15 +9,8 @@ import numpy as np
 if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
-# ~~~~ Seed & Device ~~~~
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 # ~~~~ Hyperparameters ~~~~
-NUM_EPISODES = 400
+NUM_EPISODES = 500
 MAX_STEPS = 200
 BATCH_SIZE = 64
 DISCOUNT = 0.99
@@ -29,8 +22,22 @@ EPS_START = 1.0
 EPS_END = 0.01
 EPS_DECAY = 0.997
 
-TRAIN = True
-RENDER = False
+TRAIN = False
+RENDER = not TRAIN
+
+
+# ~~~~ Environment ~~~~
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+env = gym.make("MountainCar-v0", render_mode="human" if RENDER else None)
+# Seed everything
+SEED = 21
+np.random.seed(SEED)
+np.random.default_rng(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 # ~~~~ Replay buffer ~~~~
@@ -42,7 +49,8 @@ class ReplayBuffer:
         self.buffer.append((state, action, reward, next_state, done))
 
     def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
+        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        batch = [self.buffer[i] for i in indices]
         s, a, r, s_, d = zip(*batch)
         return (
             torch.tensor(np.stack(s), dtype=torch.float32, device=DEVICE),
@@ -93,13 +101,16 @@ class DQNAgent:
         self.n_actions = n_actions
         self.steps = 0
 
+    # Soft updating instead of hard updating for smoother transitions
+    def soft_update(self, tau=0.005):
+        for t, s in zip(self.target.parameters(), self.online.parameters()):
+            t.data.copy_(tau * s.data + (1 - tau) * t.data)
+
     def act(self, state, epsilon):
         if random.random() < epsilon:
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            state_v = torch.tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(
-                0
-            )
+            state_v = torch.tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(0)
             return int(self.online(state_v).argmax(dim=1).item())
 
     def learn(self, batch_size):
@@ -121,16 +132,10 @@ class DQNAgent:
         self.optimizer.step()
 
         self.steps += 1
-        if self.steps % TARGET_UPDATE_FREQ == 0:
-            self.target.load_state_dict(self.online.state_dict())
+        self.soft_update()
 
         return loss.item()
-
-
-# ~~~~ Environment ~~~~
-env = gym.make("MountainCar-v0", render_mode="human" if RENDER else None)
 agent = DQNAgent(env)
-
 
 # ~~~~ Custom Rewards ~~~~
 def custom_reward(state, next_state, env_reward):
@@ -138,7 +143,8 @@ def custom_reward(state, next_state, env_reward):
 
     # Base shaping
     modified_reward = 0.2 * (np.cos(np.deg2rad(position * 360)) + 2.0 * abs(velocity))
-
+    modified_reward -= 0.5
+    
     # Progress bonuses
     if position > 0.48:
         modified_reward += 10.0
@@ -147,11 +153,9 @@ def custom_reward(state, next_state, env_reward):
     elif position > 0.30:
         modified_reward += 1.0
 
-    modified_reward += env_reward  
+    modified_reward += env_reward
 
     return float(np.clip(modified_reward, -50.0, 50.0))
-    # return env_reward
-
 
 # ~~ Pre-fill replay buffer ~~
 state, _ = env.reset(seed=SEED)
@@ -164,7 +168,7 @@ for _ in range(MIN_REPLAY_SIZE):
     done = terminated or truncated
     reward = custom_reward(state, next_state, env_reward)
     agent.replay.push(state, action, reward, next_state, done)
-    state = next_state if not done else env.reset()[0]
+    state = next_state if not done else normalize_state(env.reset()[0])
 
 # Scout out the env
 print("Pre-filled replay:", len(agent.replay))
@@ -186,12 +190,7 @@ def plot_training(rewards, losses, window=50, max_reward=100):
     plt.title("Obtained Rewards")
     plt.plot(rewards_history, label="Raw Reward", color="#58A560")
     if sma is not None:
-        plt.plot(
-            # range(window - 1, len(rewards_history)),
-            sma,
-            label=f"SMA {window}",
-            color="#F08B17",
-        )
+        plt.plot(sma, label=f"SMA {window}", color="#F08B17")
     plt.xlabel("Episode")
     plt.ylabel("Rewards")
     plt.legend()
@@ -225,7 +224,7 @@ def train():
 
         for step in range(MAX_STEPS):
             action = agent.act(state, epsilon)
-            next_state, reward, terminated, truncated, _ = env.step(action)
+            next_state, env_reward, terminated, truncated, _ = env.step(action)
             next_state = normalize_state(next_state)
 
             done = terminated or truncated
@@ -259,7 +258,7 @@ def train():
                 f"Reward Avg10 {np.mean(rewards_history[-10:]):7.2f} | "
                 f"Epsilon {epsilon:.3f}"
             )
-    # ~~~~ Save model ~~~~
+    # Save model
     torch.save(agent.online.state_dict(), f"dqn_mountaincar_{NUM_EPISODES}.pth")
     print("Model saved.")
     plot_training(rewards_history, loss_history)
@@ -277,7 +276,7 @@ def test(max_episodes):
         ep_steps = 0
 
         for _ in range(MAX_STEPS):
-            action = agent.act(state, epsilon=0.0)  # greedy
+            action = agent.act(state, epsilon=0.0)
             next_state, env_reward, terminated, truncated, _ = env.step(action)
             next_state = normalize_state(next_state)
 
@@ -320,7 +319,7 @@ if __name__ == "__main__":
         train()
     else:
         print("Test")
-        episodes = 400
+        episodes = 500
         model_path = f"dqn_mountaincar_{episodes}.pth"
 
         agent.online.load_state_dict(torch.load(model_path, map_location=DEVICE))
