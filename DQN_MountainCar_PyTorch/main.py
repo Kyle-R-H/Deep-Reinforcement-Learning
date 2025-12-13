@@ -1,7 +1,7 @@
 import random, collections
 import matplotlib.pyplot as plt
 import torch, torch.nn as nn, torch.optim as optim
-import gym
+import gymnasium as gym
 
 import numpy as np
 
@@ -10,34 +10,34 @@ if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
 # ~~~~ Hyperparameters ~~~~
-NUM_EPISODES = 500
+TRAIN = True
+RENDER = not TRAIN
+
+NUM_EPISODES = 200
 MAX_STEPS = 200
 BATCH_SIZE = 64
 DISCOUNT = 0.99
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 75e-4
 BUFFER_SIZE = 50000
 MIN_REPLAY_SIZE = 1000
-TARGET_UPDATE_FREQ = 1000
-EPS_START = 1.0
+EPS_START = 0.999
 EPS_END = 0.01
 EPS_DECAY = 0.997
-
-TRAIN = False
-RENDER = not TRAIN
-
+TAU = 0.005
 
 # ~~~~ Environment ~~~~
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 env = gym.make("MountainCar-v0", render_mode="human" if RENDER else None)
+
 # Seed everything
 SEED = 21
-np.random.seed(SEED)
-np.random.default_rng(SEED)
+random.seed(SEED)
 torch.manual_seed(SEED)
+env.reset(seed=SEED)
+env.action_space.seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+
 
 
 # ~~~~ Replay buffer ~~~~
@@ -69,7 +69,36 @@ def normalize_state(state):
     high = env.observation_space.high
     return (state - low) / (high - low)
 
+# ~~~~ Custom Rewards ~~~~
+def custom_reward(state, next_state, env_reward):
+    position, velocity = next_state
 
+    # Base shaping
+    modified_reward = 0.2 * (np.cos(np.deg2rad(position * 360)) + 2.0 * abs(velocity))
+    modified_reward -= 0.9
+    
+    # Progress bonuses
+    if position > 0.48:
+        modified_reward += 10.0
+    elif position > 0.40:
+        modified_reward += 4.0
+    elif position > 0.30:
+        modified_reward += 1.0
+
+    return float(np.clip(modified_reward, -50.0, 50.0))
+
+def customStep(action):
+    raw_next_state, env_reward, done, trunc, info = env.step(action)
+    return normalize_state(raw_next_state), custom_reward(raw_next_state), done, trunc, info
+
+def customReset(seed=None):
+    if seed is not None:
+        raw_state, info = env.reset(seed=seed)
+    else:
+        raw_state, info = env.reset()
+    return normalize_state(raw_state), info
+
+    
 # ~~~~ Q-network ~~~~
 class QNet(nn.Module):
     def __init__(self, obs_dim, n_actions):
@@ -102,9 +131,9 @@ class DQNAgent:
         self.steps = 0
 
     # Soft updating instead of hard updating for smoother transitions
-    def soft_update(self, tau=0.005):
+    def soft_update(self):
         for t, s in zip(self.target.parameters(), self.online.parameters()):
-            t.data.copy_(tau * s.data + (1 - tau) * t.data)
+            t.data.copy_(TAU * s.data + (1 - TAU) * t.data)
 
     def act(self, state, epsilon):
         if random.random() < epsilon:
@@ -115,13 +144,12 @@ class DQNAgent:
 
     def learn(self, batch_size):
         states, actions, rewards, next_states, dones = self.replay.sample(batch_size)
-
-        q_values = self.online(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        q_values = self.online(states).gather(1, actions.unsqueeze(1))
 
         # Double DQN
         with torch.no_grad():
             next_actions = self.online(next_states).argmax(dim=1, keepdim=True)
-            next_q = self.target(next_states).gather(1, next_actions).squeeze(1)
+            next_q = self.target(next_states).gather(1, next_actions)
             target_q = rewards + (1.0 - dones) * DISCOUNT * next_q
 
         # Huber loss
@@ -129,53 +157,33 @@ class DQNAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.online.parameters(), 5)
         self.optimizer.step()
 
         self.steps += 1
         self.soft_update()
-
         return loss.item()
+    
 agent = DQNAgent(env)
 
-# ~~~~ Custom Rewards ~~~~
-def custom_reward(state, next_state, env_reward):
-    position, velocity = next_state
-
-    # Base shaping
-    modified_reward = 0.2 * (np.cos(np.deg2rad(position * 360)) + 2.0 * abs(velocity))
-    modified_reward -= 0.5
-    
-    # Progress bonuses
-    if position > 0.48:
-        modified_reward += 10.0
-    elif position > 0.40:
-        modified_reward += 4.0
-    elif position > 0.30:
-        modified_reward += 1.0
-
-    modified_reward += env_reward
-
-    return float(np.clip(modified_reward, -50.0, 50.0))
-
 # ~~ Pre-fill replay buffer ~~
-state, _ = env.reset(seed=SEED)
+state, _ = customReset(seed=SEED)
 state = normalize_state(state)
 for _ in range(MIN_REPLAY_SIZE):
     action = env.action_space.sample()
-    next_state, env_reward, terminated, truncated, _ = env.step(action)
+    next_state, env_reward, terminated, truncated, _ = customStep(action)
     next_state = normalize_state(next_state)
-
     done = terminated or truncated
     reward = custom_reward(state, next_state, env_reward)
     agent.replay.push(state, action, reward, next_state, done)
-    state = next_state if not done else normalize_state(env.reset()[0])
+    state = next_state if not done else normalize_state(customReset()[0])
 
 # Scout out the env
 print("Pre-filled replay:", len(agent.replay))
 
 
 # ~~~~ Plots ~~~~
-def plot_training(rewards, losses, window=50, max_reward=100):
+def plot_training(rewards, losses, window=50, max_reward=1000):
     # Rewards plot
     rewards = np.array(rewards)
     rewards_history = np.clip(rewards, None, max_reward)
@@ -213,10 +221,9 @@ def train():
     epsilon = EPS_START
     rewards_history = []
     loss_history = []
-    step_history = []
 
     for episode in range(1, NUM_EPISODES + 1):
-        state, _ = env.reset()
+        state, _ = customReset()
         state = normalize_state(state)
         ep_reward = 0.0
         ep_losses = []
@@ -224,7 +231,7 @@ def train():
 
         for step in range(MAX_STEPS):
             action = agent.act(state, epsilon)
-            next_state, env_reward, terminated, truncated, _ = env.step(action)
+            next_state, env_reward, terminated, truncated, _ = customStep(action)
             next_state = normalize_state(next_state)
 
             done = terminated or truncated
@@ -243,20 +250,16 @@ def train():
             if done:
                 break
 
-        if episode < 50:
-            epsilon = 1.0
-        else:
-            epsilon = max(EPS_END, epsilon * EPS_DECAY)
         rewards_history.append(ep_reward)
-        step_history.append(ep_steps)
+        epsilon = max(EPS_END, epsilon * EPS_DECAY)
 
         if episode % 10 == 0:
             print(
                 f"Episode {episode:4d} | "
                 f"Reward {ep_reward:7.2f} | "
                 f"Steps {ep_steps:3d} | "
-                f"Reward Avg10 {np.mean(rewards_history[-10:]):7.2f} | "
-                f"Epsilon {epsilon:.3f}"
+                f"Epsilon {epsilon:.3f} | "
+                f"Loss {loss_history:.3d}"
             )
     # Save model
     torch.save(agent.online.state_dict(), f"dqn_mountaincar_{NUM_EPISODES}.pth")
@@ -266,18 +269,15 @@ def train():
 
 # ~~~~ Testing ~~~~
 def test(max_episodes):
-    returns = []
-    steps_history = []
-
     for episode in range(1, max_episodes + 1):
-        state, _ = env.reset(seed=SEED)
+        state, _ = customReset(seed=SEED)
         state = normalize_state(state)
         episode_reward = 0.0
         ep_steps = 0
 
         for _ in range(MAX_STEPS):
             action = agent.act(state, epsilon=0.0)
-            next_state, env_reward, terminated, truncated, _ = env.step(action)
+            next_state, env_reward, terminated, truncated, _ = customStep(action)
             next_state = normalize_state(next_state)
 
             done = terminated or truncated
@@ -287,40 +287,21 @@ def test(max_episodes):
             state = next_state
             episode_reward += reward
             ep_steps += 1
-
             if done:
                 break
-
-        returns.append(episode_reward)
-        steps_history.append(ep_steps)
-
         print(
             f"Episode {episode:3d} | "
             f"Steps {ep_steps:3d} | "
-            f"Return {episode_reward:8.2f}"
+            f"Return {episode_reward:7.2f}"
         )
-
-    returns = np.array(returns)
-    steps_history = np.array(steps_history)
-
-    print(
-        f"\nTest Summary - {max_episodes} episodes:\n"
-        f"Mean Return: {returns.mean():.2f}\n"
-        f"Mean Steps : {steps_history.mean():.1f}"
-    )
-
-    return returns, steps_history
 
 
 # ~~~~ Main Runner ~~~~
 if __name__ == "__main__":
     if TRAIN:
-        print("Train")
         train()
     else:
-        print("Test")
-        episodes = 500
-        model_path = f"dqn_mountaincar_{episodes}.pth"
+        model_path = f"dqn_mountaincar_{NUM_EPISODES}.pth"
 
         agent.online.load_state_dict(torch.load(model_path, map_location=DEVICE))
         agent.online.eval()
