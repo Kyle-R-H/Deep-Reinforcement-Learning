@@ -17,7 +17,7 @@ NUM_EPISODES = 800
 MAX_STEPS = 200
 BATCH_SIZE = 64
 DISCOUNT = 0.99
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 75e-4
 BUFFER_SIZE = 40000
 MIN_REPLAY_SIZE = 1000
 EPS_START = 0.999
@@ -64,19 +64,21 @@ class ReplayBuffer:
 
 
 # ~~~~ Normalise Function ~~~~
-def normalize_state(state):
+def Observe_state(state):
     low = env.observation_space.low
     high = env.observation_space.high
-    return (state - low) / (high - low)
+    # print(f"State: {state} | Low: {low} | High: {high}")
+    output = (state - low) / (high - low)
+    # print(f"Out: {output}")
+    return output
 
 
 # ~~~~ Custom reward ~~~~
 def custom_reward(next_state, env_reward=0.0):
-    # next_state is a numpy array [position, velocity]
     position, velocity = next_state
-    # base shaping (same idea as yours)
     modified_reward = 0.2 * (np.cos(np.deg2rad(position * 360)) + 2.0 * abs(velocity))
-    modified_reward -= 0.9
+    # Ev reward is -1 for each step, we replace it with a reduced value
+    modified_reward -= 0.5
 
     if position > 0.48:
         modified_reward += 10.0
@@ -84,25 +86,27 @@ def custom_reward(next_state, env_reward=0.0):
         modified_reward += 4.0
     elif position > 0.30:
         modified_reward += 1.0
+    # elif position < 0 and velocity >= 0.4:
+    #     modified_reward += 0.5
 
-    # clip to avoid huge spikes (you can tune this)
-    return float(np.clip(modified_reward, -50.0, 50.0))
+    # return float(np.clip(modified_reward, -50.0, 50.0))
+    # print(f"Env Reward: {env_reward} | Mod Reward: {modified_reward}")
+    return modified_reward
 
 
 # ~~~~ Custom Step and reset ~~~~
 def custom_step(action):
     raw_next_state, env_reward, terminated, truncated, info = env.step(action)
     mod_reward = custom_reward(raw_next_state, env_reward)
-    norm_next_state = normalize_state(raw_next_state)
+    norm_next_state = Observe_state(raw_next_state)
     return norm_next_state, mod_reward, terminated, truncated, info
-
 
 def custom_reset(seed=None):
     if seed is not None:
         raw_state, info = env.reset(seed=seed)
     else:
         raw_state, info = env.reset()
-    return normalize_state(raw_state), info
+    return Observe_state(raw_state), info
 
 
 # ~~~~ Q-network ~~~~
@@ -196,7 +200,7 @@ for _ in range(MIN_REPLAY_SIZE):
     done = terminated or truncated
     agent.replay.push(state, action, reward, next_state, done)
     if done:
-        state, _ = custom_reset()   # start new episode in prefill
+        state, _ = custom_reset()
     else:
         state = next_state
 
@@ -212,7 +216,7 @@ def plot_training(rewards, losses, window=50, max_reward=1000):
         sma = None
 
     plt.figure()
-    plt.title("Obtained Rewards")
+    plt.title(f"LR: {LEARNING_RATE} | Buf Size: {BUFFER_SIZE} | Epsi Decay: {EPS_DECAY}")
     plt.plot(rewards_history, label="Raw Reward")
     if sma is not None:
         plt.plot(sma, label=f"SMA {window}")
@@ -223,7 +227,7 @@ def plot_training(rewards, losses, window=50, max_reward=1000):
     plt.show()
 
     plt.figure()
-    plt.title("Network Loss")
+    plt.title(f"LR: {LEARNING_RATE} | Buf Size: {BUFFER_SIZE} | Epsi Decay: {EPS_DECAY}")
     plt.plot(losses, label="Loss")
     plt.xlabel("Training Step")
     plt.ylabel("Loss")
@@ -241,7 +245,6 @@ def train():
     for episode in range(1, NUM_EPISODES + 1):
         state, _ = custom_reset()
         ep_reward = 0.0
-        ep_losses = []
         ep_steps = 0
 
         for step in range(MAX_STEPS):
@@ -256,7 +259,6 @@ def train():
 
             if len(agent.replay) >= BATCH_SIZE:
                 loss = agent.learn(BATCH_SIZE)
-                ep_losses.append(loss)
                 loss_history.append(loss)
 
             if done:
@@ -265,7 +267,6 @@ def train():
         rewards_history.append(ep_reward)
         epsilon = max(EPS_END, epsilon * EPS_DECAY)
 
-        last_loss = loss_history[-1] if loss_history else 0.0
         if ep_steps < 200 or episode % 10 == 0:
         # if ep_steps < 200 or episode % 100 == 0:
             print(
@@ -273,7 +274,6 @@ def train():
                 f"Reward {ep_reward:7.2f} | "
                 f"Steps {ep_steps:3d} | "
                 f"Epsilon {epsilon:.3f} | "
-                f"LastLoss {last_loss:.4f}"
             )
 
     torch.save(agent.online.state_dict(), f"dqn_mountaincar_{NUM_EPISODES}.pth")
@@ -308,6 +308,7 @@ def test(max_episodes):
 # ~~~~ Main Runner ~~~~
 if __name__ == "__main__":
     if TRAIN:
+        print(f"LR: {LEARNING_RATE} | Buf Size: {BUFFER_SIZE} | Epsi Decay: {EPS_DECAY}")
         train()
     else:
         model_path = f"dqn_mountaincar_{NUM_EPISODES}.pth"
