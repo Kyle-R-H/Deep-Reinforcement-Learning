@@ -10,9 +10,10 @@ if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
 # ~~~~ Hyperparameters ~~~~
-TRAIN = True
+TRAIN = False
 RENDER = not TRAIN
 
+NUM_AGENTS = 4
 NUM_EPISODES = 1000
 MAX_STEPS = 200
 BATCH_SIZE = 64
@@ -77,26 +78,15 @@ def Observe_state(state):
 # ~~~~ Custom reward ~~~~
 def custom_reward(next_state, env_reward=0.0):
     position, velocity = next_state
-    
     # Env reward is -1 for each step
-    modified_reward = env_reward
-    
+    reward = env_reward
     # Velocity
-    modified_reward += 5 * abs(velocity)
-    
-    # Position
-    # if position > 0.48:
-    #     modified_reward += 10.0
-    # elif position > 0.40:
-    #     modified_reward += 4.0
-    # elif position > 0.30:
-    #     modified_reward += 0.5
-    # el
+    reward += 5 * abs(velocity)
     if position >= 0.5:
-        modified_reward += 50
+        reward += 50
 
-    # print(f"Env Reward: {env_reward} | Mod Reward: {modified_reward}")
-    return modified_reward
+    # print(f"Env Reward: {env_reward} | Mod Reward: {reward}")
+    return reward
 
 
 # ~~~~ Custom Step and reset ~~~~
@@ -107,10 +97,7 @@ def custom_step(action):
     return norm_next_state, mod_reward, terminated, truncated, info
 
 def custom_reset(seed=None):
-    if seed is not None:
-        raw_state, info = env.reset(seed=seed)
-    else:
-        raw_state, info = env.reset()
+    raw_state, info = env.reset(seed=seed)
     return Observe_state(raw_state), info
 
 
@@ -144,7 +131,7 @@ class QNet(nn.Module):
 
 # ~~~~ Agent ~~~~
 class DQNAgent:
-    def __init__(self, env):
+    def __init__(self, env, replay_buffer):
         obs_dim = env.observation_space.shape[0]
         n_actions = env.action_space.n
 
@@ -157,20 +144,12 @@ class DQNAgent:
             # weight_decay=LR_DECAY
         )
 
-        self.replay = ReplayBuffer(BUFFER_SIZE)
-        self.n_actions = n_actions
+        self.replay = replay_buffer
         self.steps = 0
 
     def soft_update(self):
         for t, s in zip(self.target.parameters(), self.online.parameters()):
             t.data.copy_(TAU * s.data + (1 - TAU) * t.data)
-
-    def act(self, state, epsilon):
-        if random.random() < epsilon:
-            return random.randrange(self.n_actions)
-        with torch.no_grad():
-            state_v = torch.tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(0)
-            return int(self.online(state_v).argmax(dim=1).item())
 
     def learn(self, batch_size):
         states, actions, rewards, next_states, dones = self.replay.sample(batch_size)
@@ -203,15 +182,26 @@ class DQNAgent:
         
         return loss.item()
 
+# ~~~~ Multi-Agent Act ~~~~
+def multi_agent_act(agents, state, epsilon):
+    if random.random() < epsilon:
+        return env.action_space.sample()
+
+    with torch.no_grad():
+        state_v = torch.tensor(state, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        qs = [agent.online(state_v) for agent in agents]
+        mean_q = torch.mean(torch.stack(qs), dim=0)
+        return int(mean_q.argmax(dim=1).item())
+
+
 # ~~ Pre-fill replay buffer ~~
-def buffer_prefill(agent):
+def buffer_prefill():
     state, _ = custom_reset(seed=SEED)
     for _ in range(MIN_REPLAY_SIZE):
         action = env.action_space.sample()
         next_state, reward, terminated, truncated, _ = custom_step(action)
-        done = terminated or truncated
-        agent.replay.push(state, action, reward, next_state, done)
-        if done:
+        shared_replay.push(state, action, reward, next_state, terminated)
+        if terminated:
             state, _ = custom_reset()
         else:
             state = next_state
@@ -260,21 +250,21 @@ def train():
         ep_steps = 0
 
         for step in range(MAX_STEPS):
-            action = agent.act(state, epsilon)
+            action = multi_agent_act(agents, state, epsilon)
             next_state, reward, terminated, truncated, _ = custom_step(action)
-            done = terminated or truncated
 
-            agent.replay.push(state, action, reward, next_state, done)
+            shared_replay.push(state, action, reward, next_state, terminated)
             state = next_state
             ep_reward += reward
             ep_steps += 1
 
             # 4 is learning delay
-            if step % 4 == 0 and len(agent.replay) >= BATCH_SIZE:
-                loss = agent.learn(BATCH_SIZE)
-                loss_history.append(loss)
+            if step % 4 == 0 and len(shared_replay) >= BATCH_SIZE:
+                for agent in agents:
+                    loss = agent.learn(BATCH_SIZE)
+                    loss_history.append(loss)
 
-            if done:
+            if terminated:
                 break
 
         rewards_history.append(ep_reward)
@@ -289,30 +279,29 @@ def train():
                 f"Epsilon {epsilon:.3f} | "
             )
 
-    torch.save(agent.online.state_dict(), f"dqn_mountaincar_{NUM_EPISODES}.pth")
+    torch.save(agents[0].online.state_dict(), f"dqn_mountaincar_{NUM_EPISODES}.pth")
     print("Model saved.")
     plot_training(rewards_history, loss_history)
 
 
 # ~~~~ Testing ~~~~
-def test(max_episodes):
-    for episode in range(1, max_episodes + 1):
+def test(episodes):
+    for episode in range(episodes):
         state, _ = custom_reset(seed=SEED)
         episode_reward = 0.0
         ep_steps = 0
 
         for _ in range(MAX_STEPS):
-            action = agent.act(state, epsilon=0.0)
+            action = multi_agent_act(agents, state, epsilon=0.0)
             next_state, reward, terminated, truncated, _ = custom_step(action)
-            done = terminated or truncated
 
             state = next_state
             episode_reward += reward
             ep_steps += 1
-            if done:
+            if terminated:
                 break
         print(
-            f"Episode {episode:3d} | "
+            f"Episode {episode+1:3d} | "
             f"Steps {ep_steps:3d} | "
             f"Return {episode_reward:7.2f}"
         )
@@ -320,16 +309,15 @@ def test(max_episodes):
 
 # ~~~~ Main Runner ~~~~
 if __name__ == "__main__":
-    agent = DQNAgent(env)
-    buffer_prefill(agent)
-    
+    shared_replay = ReplayBuffer(BUFFER_SIZE)
+    agents = [DQNAgent(env, shared_replay) for _ in range(NUM_AGENTS)]
+
+
     if TRAIN:
-        print(f"LR: {LEARNING_RATE} | Buf Size: {BUFFER_SIZE} | Epsi Decay: {EPS_DECAY}")
+        buffer_prefill()
         train()
     else:
-        model_path = f"dqn_mountaincar_{NUM_EPISODES}.pth"
-        agent.online.load_state_dict(torch.load(model_path, map_location=DEVICE))
-        agent.online.eval()
-        agent.target.load_state_dict(agent.online.state_dict())
-        print(f"Loaded model from {model_path}")
+        for agent in agents:
+            agent.online.load_state_dict(torch.load(f"dqn_mountaincar_{NUM_EPISODES}.pth", map_location=DEVICE))
+            agent.target.load_state_dict(agent.online.state_dict())
         test(2)
