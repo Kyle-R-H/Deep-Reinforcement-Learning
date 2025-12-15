@@ -13,17 +13,18 @@ if not hasattr(np, "bool8"):
 TRAIN = True
 RENDER = not TRAIN
 
-NUM_EPISODES = 800
+NUM_EPISODES = 1000
 MAX_STEPS = 200
 BATCH_SIZE = 64
 DISCOUNT = 0.99
-LEARNING_RATE = 75e-4
-BUFFER_SIZE = 40000
-MIN_REPLAY_SIZE = 1000
-EPS_START = 0.999
-EPS_END = 0.01
-EPS_DECAY = 0.998
-TAU = 0.005
+LEARNING_RATE = 1e-4
+# LR_DECAY = 0.001
+BUFFER_SIZE = 50000
+MIN_REPLAY_SIZE = 5000
+EPS_START = 1.0
+EPS_END = 0.05
+EPS_DECAY = 0.995
+TAU = 0.001
 
 # ~~~~ Environment ~~~~
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,20 +77,24 @@ def Observe_state(state):
 # ~~~~ Custom reward ~~~~
 def custom_reward(next_state, env_reward=0.0):
     position, velocity = next_state
-    modified_reward = 0.2 * (np.cos(np.deg2rad(position * 360)) + 2.0 * abs(velocity))
-    # Ev reward is -1 for each step, we replace it with a reduced value
-    modified_reward -= 0.5
-
-    if position > 0.48:
-        modified_reward += 10.0
-    elif position > 0.40:
-        modified_reward += 4.0
-    elif position > 0.30:
-        modified_reward += 1.0
-    # elif position < 0 and velocity >= 0.4:
+    
+    # Env reward is -1 for each step
+    modified_reward = env_reward
+    
+    # Velocity
+    modified_reward += 5 * abs(velocity)
+    
+    # Position
+    # if position > 0.48:
+    #     modified_reward += 10.0
+    # elif position > 0.40:
+    #     modified_reward += 4.0
+    # elif position > 0.30:
     #     modified_reward += 0.5
+    # el
+    if position >= 0.5:
+        modified_reward += 50
 
-    # return float(np.clip(modified_reward, -50.0, 50.0))
     # print(f"Env Reward: {env_reward} | Mod Reward: {modified_reward}")
     return modified_reward
 
@@ -146,7 +151,11 @@ class DQNAgent:
         self.online = QNet(obs_dim, n_actions).to(DEVICE)
         self.target = QNet(obs_dim, n_actions).to(DEVICE)
         self.target.load_state_dict(self.online.state_dict())
-        self.optimizer = optim.Adam(self.online.parameters(), lr=LEARNING_RATE)
+        self.optimizer = optim.Adam(
+            self.online.parameters(),
+            lr=LEARNING_RATE,
+            # weight_decay=LR_DECAY
+        )
 
         self.replay = ReplayBuffer(BUFFER_SIZE)
         self.n_actions = n_actions
@@ -179,6 +188,7 @@ class DQNAgent:
 
         loss = nn.SmoothL1Loss()(q_values, target_q)
 
+        # Backprop
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.online.parameters(), 5)
@@ -186,23 +196,25 @@ class DQNAgent:
 
         self.steps += 1
         self.soft_update()
+        
+        # # Hard update - Didnt work as good as soft update when testing
+        # if self.steps % 1000 == 0:
+        #     self.target.load_state_dict(self.online.state_dict())
+        
         return loss.item()
 
-
-agent = DQNAgent(env)
-
-
 # ~~ Pre-fill replay buffer ~~
-state, _ = custom_reset(seed=SEED)
-for _ in range(MIN_REPLAY_SIZE):
-    action = env.action_space.sample()
-    next_state, reward, terminated, truncated, _ = custom_step(action)
-    done = terminated or truncated
-    agent.replay.push(state, action, reward, next_state, done)
-    if done:
-        state, _ = custom_reset()
-    else:
-        state = next_state
+def buffer_prefill(agent):
+    state, _ = custom_reset(seed=SEED)
+    for _ in range(MIN_REPLAY_SIZE):
+        action = env.action_space.sample()
+        next_state, reward, terminated, truncated, _ = custom_step(action)
+        done = terminated or truncated
+        agent.replay.push(state, action, reward, next_state, done)
+        if done:
+            state, _ = custom_reset()
+        else:
+            state = next_state
 
 # ~~~~ Plots ~~~~
 def plot_training(rewards, losses, window=50, max_reward=1000):
@@ -257,7 +269,8 @@ def train():
             ep_reward += reward
             ep_steps += 1
 
-            if len(agent.replay) >= BATCH_SIZE:
+            # 4 is learning delay
+            if step % 4 == 0 and len(agent.replay) >= BATCH_SIZE:
                 loss = agent.learn(BATCH_SIZE)
                 loss_history.append(loss)
 
@@ -307,6 +320,9 @@ def test(max_episodes):
 
 # ~~~~ Main Runner ~~~~
 if __name__ == "__main__":
+    agent = DQNAgent(env)
+    buffer_prefill(agent)
+    
     if TRAIN:
         print(f"LR: {LEARNING_RATE} | Buf Size: {BUFFER_SIZE} | Epsi Decay: {EPS_DECAY}")
         train()
