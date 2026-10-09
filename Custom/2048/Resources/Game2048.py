@@ -260,16 +260,20 @@ while running:
 
             # MAKE MOVE
             if action is not None:
-                moved, reward, validMoves = (
+                terminated, truncated, reward, validActions, info = (
                     game.step(action)
                 )
                 print(
-                    "Action:",
-                    action,
+                    "Terminated:",
+                    terminated,
+                    "| Truncated:",
+                    truncated,
                     "| Reward:",
                     reward,
+                    "| Action:",
+                    action,
                     "| Valid moves:",
-                    validMoves
+                    validActions
                 )
 
     # DRAW

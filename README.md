@@ -1,5 +1,2 @@
-# Deep Reinforcement Learning
-A Deep Reinforcement Learning (DRL) AI learning to play an environment video game via trial and error
-
-## Environment API
-https://gymnasium.farama.org/
+# Reinforcement Learning (RL)
+This repo will cover RL projects with open-source and custom environments.
