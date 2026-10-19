@@ -295,8 +295,8 @@ class Env2048:
                 for row in range(self.rows):
                     self.board[row][col] = line[row]
 
-    # HAS VALID ACTIONS
-    def hasValidActions(self):
+    # UPDATE VALID ACTIONS
+    def updateValidActions(self):
         self.validActions.clear()
 
         self.moveLeft(True)
@@ -304,11 +304,11 @@ class Env2048:
         self.moveUp(True)
         self.moveDown(True)
         
-        return len(self.getValidActions()) > 0
+        # return len(self.validActions()) > 0
 
     # GAME OVER
     def isGameOver(self):
-        return not self.hasValidActions()
+        return len(self.getValidActions()) <= 0
 
     # SHIFT VALUES
     def step(self, action):
@@ -330,14 +330,15 @@ class Env2048:
         else:
             raise ValueError(f"Invalid action: {action}")
 
-        terminated = self.board == oldBoard
+        moveAvailable = self.board == oldBoard
         reward = self.score - oldScore
 
-        if not terminated:
+        if not moveAvailable:
             self.addNewValue()
 
-        self.hasValidActions()
+        self.updateValidActions()
 
+        terminated = len(self.validActions) == 0
         truncated = False
         info = {}
 
@@ -347,7 +348,7 @@ class Env2048:
             terminated,
             truncated,
             reward,
-            self.validActions,
+            self.validActions.copy(),
             info
         )
 
@@ -361,7 +362,12 @@ class Env2048:
 
     # Get Valid Actions
     def getValidActions(self):
+        self.updateValidActions()
         return self.validActions
+    # Get Valid Actions
+    def getValidActions(env):
+        env.updateValidActions()
+        return list(env.validActions)
     
     # TOTAL BOARD VALUE
     def getTotalValue(self):
